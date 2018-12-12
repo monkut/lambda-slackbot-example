@@ -1,0 +1,100 @@
+version: 2
+
+jobs:
+  build:
+    working_directory: ~/app/
+    docker:
+      - image: circleci/python:3.6.5
+        environment:
+          PIPENV_VENV_IN_PROJECT: true
+    steps:
+      - checkout
+      - run: sudo chown -R circleci:circleci /usr/local/bin
+      - run: sudo chown -R circleci:circleci /usr/local/lib/python3.6/site-packages
+      - restore_cache:
+          key: deps-v1-{{ .Branch }}-{{ checksum "Pipfile.lock" }}
+      - run:
+          name: Upgrade pipenv
+          command: |
+            pip install pipenv -U
+      - run:
+          name: install dependencies
+          command: |
+            pipenv sync --dev
+      - save_cache:
+          key: deps-v1-{{ .Branch }}-{{ checksum "Pipfile.lock" }}
+          paths:
+            - "/home/circleci/.aws"
+            - "/home/circlci/.local"
+            - "/usr/local/bin"
+            - "/usr/local/lib/python3.6/site-packages"
+      - run:
+          name: run tests
+          command: |
+            make test
+
+  deploy:
+      docker:
+          - image: circleci/python:3.6.5
+      steps:
+        - checkout
+        - run: sudo chown -R circleci:circleci /usr/local/bin
+        - run: sudo chown -R circleci:circleci /usr/local/lib/python3.6/site-packages
+        - restore_cache:
+            key: deps-v4-{{ .Branch }}-deploy-{{ checksum "Pipfile.lock" }}
+        - run:
+            name: prepare boto3 credentials and awscli
+            command: |
+              # install envsubst (provided by gettext-base)
+              sudo apt install gettext-base
+
+              # for deployment
+              pip install awscli
+
+              # prepare credentials
+              mkdir -p ~/.aws
+              cat ./infrastructure/aws/awscli/credentials.template | envsubst > ~/.aws/credentials
+              cat ./infrastructure/aws/awscli/config.template | envsubst > ~/.aws/config
+              # test aws cli
+              aws sts get-caller-identity
+        - run:
+            name: Upgrade pipenv & zappa settings generator
+            command: |
+              pip install pipenv -U
+              pip install boto3
+        - run:
+            name: install locked dependencies
+            command: |
+              # Project Packages
+              pipenv sync
+        - save_cache:
+            key: deps-v4-{{ .Branch }}-deploy-{{ checksum "Pipfile.lock" }}
+            paths:
+              - "/home/circleci/.aws"
+              - "/home/circleci/.profile"
+              - "/home/circleci/.local/"
+              - "/usr/local/bin"
+              - "/usr/local/lib/python3.6/site-packages"
+        - run:
+            name: prepare zappa_settings
+            command: |
+              # install config generator
+              pip install git+https://github.com/monkut/zappa-configuration-generator
+              python3.6 -m gappa.settings.generate --stack-name tobor-dev --stage dev --zappa-parameters project_name=tobor s3_bucket=${BUCKET_NAME} > ./zappa_settings.json
+        - run:
+            name: run zappa update
+            command: |
+              pipenv run zappa update dev
+
+workflows:
+  version: 2
+  test-deploy:
+    jobs:
+      - build
+      - deploy:
+          requires:
+            - build
+          filters:
+            branches:
+              only:
+                - master
